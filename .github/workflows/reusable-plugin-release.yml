@@ -39,10 +39,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout plugin-sdk
-        env:
-          SDK_TOKEN: ${{ secrets.REGISTRY_PAT }}
         run: |
-          git clone --depth 1 "https://x-access-token:${SDK_TOKEN}@github.com/diaryx-org/plugin-sdk.git" ../plugin-sdk
+          git clone --depth 1 https://github.com/diaryx-org/plugin-sdk.git ../plugin-sdk
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
