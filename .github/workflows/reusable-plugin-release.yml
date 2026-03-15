@@ -1,0 +1,117 @@
+# Reusable workflow for building and releasing Diaryx WASM plugins.
+#
+# Usage in a plugin repo's .github/workflows/release.yml:
+#
+#   jobs:
+#     release:
+#       uses: diaryx-org/.github/.github/workflows/reusable-plugin-release.yml@main
+#       with:
+#         plugin-id: diaryx.my-plugin
+#         crate-name: diaryx_my_plugin_extism
+#       secrets:
+#         REGISTRY_PAT: ${{ secrets.REGISTRY_PAT }}
+
+name: Plugin Release
+
+on:
+  workflow_call:
+    inputs:
+      plugin-id:
+        description: "Marketplace plugin ID (e.g. diaryx.math)"
+        required: true
+        type: string
+      crate-name:
+        description: "Rust crate name for the WASM binary (e.g. diaryx_math_extism)"
+        required: true
+        type: string
+    secrets:
+      REGISTRY_PAT:
+        description: "PAT with push access to plugin-registry repo"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+
+      - name: Checkout plugin-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: diaryx-org/plugin-sdk
+          path: ../plugin-sdk
+          token: ${{ secrets.REGISTRY_PAT || github.token }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build WASM
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Compute metadata
+        id: meta
+        run: |
+          WASM="target/wasm32-unknown-unknown/release/${{ inputs.crate-name }}.wasm"
+          SHA=$(sha256sum "$WASM" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$WASM")
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/wasm32-unknown-unknown/release/${{ inputs.crate-name }}.wasm
+          generate_release_notes: true
+
+      - name: Update plugin-registry
+        if: ${{ secrets.REGISTRY_PAT != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_PAT }}
+        run: |
+          PLUGIN_ID="${{ inputs.plugin-id }}"
+          PLUGIN_FILE="plugins/${PLUGIN_ID}.md"
+          VERSION="${{ steps.meta.outputs.version }}"
+          SHA="${{ steps.meta.outputs.sha256 }}"
+          SIZE="${{ steps.meta.outputs.size }}"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${{ inputs.crate-name }}.wasm"
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          BRANCH="release/${PLUGIN_ID}-v${VERSION}"
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/diaryx-org/plugin-registry.git" /tmp/registry
+          cd /tmp/registry
+
+          if [ ! -f "$PLUGIN_FILE" ]; then
+            echo "Warning: $PLUGIN_FILE not found in registry, skipping update"
+            exit 0
+          fi
+
+          python3 -c "
+          import re
+          text = open('$PLUGIN_FILE').read()
+          text = re.sub(r'version: \".*?\"', f'version: \"$VERSION\"', text, count=1)
+          text = re.sub(r'url: \".*?\"', f'url: \"$URL\"', text, count=1)
+          text = re.sub(r'sha256: \".*?\"', f'sha256: \"$SHA\"', text, count=1)
+          text = re.sub(r'size: \d+', f'size: $SIZE', text, count=1)
+          text = re.sub(r'published_at: \".*?\"', f'published_at: \"$NOW\"', text, count=1)
+          open('$PLUGIN_FILE', 'w').write(text)
+          "
+
+          git checkout -b "$BRANCH"
+          git add "$PLUGIN_FILE"
+          git commit -m "release: ${PLUGIN_ID} v${VERSION}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --repo diaryx-org/plugin-registry \
+            --title "release: ${PLUGIN_ID} v${VERSION}" \
+            --body "Automated release from [${REPO_NAME} ${GITHUB_REF_NAME}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME})" \
+            --head "$BRANCH"
