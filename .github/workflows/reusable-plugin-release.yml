@@ -71,7 +71,7 @@ jobs:
           generate_release_notes: true
 
       - name: Update plugin-registry
-        if: ${{ secrets.REGISTRY_PAT != '' }}
+        if: ${{ env.GH_TOKEN != '' }}
         env:
           GH_TOKEN: ${{ secrets.REGISTRY_PAT }}
         run: |
