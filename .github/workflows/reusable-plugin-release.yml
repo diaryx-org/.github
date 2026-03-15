@@ -38,10 +38,6 @@ jobs:
       - name: Checkout plugin
         uses: actions/checkout@v4
 
-      - name: Checkout plugin-sdk
-        run: |
-          git clone --depth 1 https://github.com/diaryx-org/plugin-sdk.git ../plugin-sdk
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
