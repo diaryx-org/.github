@@ -29,12 +29,11 @@ on:
         description: "PAT with push access to plugin-registry repo"
         required: false
 
-permissions:
-  contents: write
-
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout plugin
         uses: actions/checkout@v4
