@@ -83,12 +83,35 @@ jobs:
           git config user.name "diaryx-bot"
           git config user.email "bot@diaryx.org"
 
+          NEW_PLUGIN=false
           if [ ! -f "$PLUGIN_FILE" ]; then
-            echo "Warning: $PLUGIN_FILE not found in registry, skipping update"
-            exit 0
-          fi
+            NEW_PLUGIN=true
+            # Derive a human-readable title from the plugin ID (last segment, capitalized)
+            TITLE=$(echo "$PLUGIN_ID" | awk -F. '{print $NF}' | sed 's/.*/\u&/')
+            python3 -c "
+          open('$PLUGIN_FILE', 'w').write('''---
+          title: \"${TITLE}\"
+          description: \"\"
+          id: \"${PLUGIN_ID}\"
+          version: \"${VERSION}\"
+          author: \"Diaryx Team\"
+          license: \"PolyForm Shield 1.0.0\"
+          repository: \"https://github.com/${GITHUB_REPOSITORY}\"
+          categories: []
+          tags: []
+          capabilities: []
+          artifact:
+            url: \"${URL}\"
+            sha256: \"${SHA}\"
+            size: ${SIZE}
+            published_at: \"${NOW}\"
+          ---
 
-          python3 -c "
+          TODO: add description
+          '''.lstrip())
+          "
+          else
+            python3 -c "
           import re
           text = open('$PLUGIN_FILE').read()
           text = re.sub(r'version: \".*?\"', f'version: \"$VERSION\"', text, count=1)
@@ -98,14 +121,22 @@ jobs:
           text = re.sub(r'published_at: \".*?\"', f'published_at: \"$NOW\"', text, count=1)
           open('$PLUGIN_FILE', 'w').write(text)
           "
+          fi
 
           git checkout -b "$BRANCH"
           git add "$PLUGIN_FILE"
           git commit -m "release: ${PLUGIN_ID} v${VERSION}"
           git push origin "$BRANCH"
 
+          BODY="Automated release from [${REPO_NAME} ${GITHUB_REF_NAME}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME})"
+          if [ "$NEW_PLUGIN" = true ]; then
+            BODY="${BODY}
+
+          > **New plugin** — description, categories, tags, capabilities, and UI slots need to be filled in before merging."
+          fi
+
           gh pr create \
             --repo diaryx-org/plugin-registry \
             --title "release: ${PLUGIN_ID} v${VERSION}" \
-            --body "Automated release from [${REPO_NAME} ${GITHUB_REF_NAME}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME})" \
+            --body "$BODY" \
             --head "$BRANCH"
