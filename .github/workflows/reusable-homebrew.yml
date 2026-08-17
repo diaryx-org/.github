@@ -82,6 +82,15 @@ on:
         type: string
         default: ""
 
+      needs-zig:
+        description: >-
+          Install the Zig toolchain even for a rust build. prov depends on
+          fig-sys/twig-sys, whose build.rs shells out to `zig build` when no
+          prebuilt payload exists for the target.
+        required: false
+        type: boolean
+        default: false
+
       # --- shared ---
       tag-prefix:
         description: >-
@@ -116,6 +125,14 @@ on:
         required: false
         type: boolean
         default: false
+      wasi-target:
+        description: >-
+          Target for the WASI build. Defaults to `wasm32-wasi` for zig and
+          `wasm32-wasip1` for rust — Zig's target names and rustup's diverged
+          when WASI previews were versioned.
+        required: false
+        type: string
+        default: ""
       tap-owner:
         description: "Owner of the tap repository"
         required: false
@@ -173,7 +190,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - if: inputs.language == 'zig'
+      - if: inputs.language == 'zig' || inputs.needs-zig
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ inputs.zig-version }}
@@ -236,17 +253,41 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
+
+      - if: inputs.language == 'zig' || inputs.needs-zig
+        uses: mlugg/setup-zig@v2
         with:
           version: ${{ inputs.zig-version }}
-      - name: Build wasm32-wasi
+
+      - if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.wasi-target || 'wasm32-wasip1' }}
+
+      - name: Build WASI (zig)
+        if: inputs.language == 'zig'
         env:
           NAME: ${{ inputs.name }}
           ZIG_FLAGS: ${{ inputs.zig-flags }}
+          WASI_TARGET: ${{ inputs.wasi-target }}
         run: |
+          target="${WASI_TARGET:-wasm32-wasi}"
           # shellcheck disable=SC2086  # flag list, not one arg
-          zig build $ZIG_FLAGS -Dtarget=wasm32-wasi --prefix zig-out/wasi
+          zig build $ZIG_FLAGS -Dtarget="$target" --prefix zig-out/wasi
           cp zig-out/wasi/bin/"$NAME".wasm "$NAME"-wasi.wasm
+
+      - name: Build WASI (rust)
+        if: inputs.language == 'rust'
+        env:
+          NAME: ${{ inputs.name }}
+          PKG: ${{ inputs.cargo-package }}
+          WASI_TARGET: ${{ inputs.wasi-target }}
+        run: |
+          target="${WASI_TARGET:-wasm32-wasip1}"
+          # shellcheck disable=SC2086  # empty PKG must collapse, not pass an empty arg
+          cargo build --release ${PKG:+-p "$PKG"} --target "$target"
+          cp target/"$target"/release/"$NAME".wasm "$NAME"-wasi.wasm
+
       - name: Attach to the GitHub Release
         uses: softprops/action-gh-release@v3
         with:
