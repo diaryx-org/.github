@@ -1,0 +1,371 @@
+# Reusable workflow: build per-arch CLI binaries, attach them to the tag's
+# GitHub Release, and push a rendered formula to diaryx-org/homebrew-tap.
+#
+# Factored out of the near-identical homebrew.yml files in twig, fig, and moid.
+# Everything those three differed on is an input here; everything they agreed on
+# (the formula shape, the tap push, the App-token mint) lives below.
+#
+# Usage in a repo's .github/workflows/homebrew.yml:
+#
+#   on:
+#     push: { tags: [v*.*.*] }
+#     workflow_dispatch:
+#   permissions:
+#     contents: write        # the caller caps what this workflow may request
+#   jobs:
+#     homebrew:
+#       uses: diaryx-org/.github/.github/workflows/reusable-homebrew.yml@main
+#       with:
+#         name: twig
+#         desc: "Parse, query, edit, and losslessly round-trip Djot documents"
+#         language: zig
+#       secrets:
+#         TAP_APP_ID: ${{ secrets.TAP_APP_ID }}
+#         TAP_APP_KEY: ${{ secrets.TAP_APP_KEY }}
+#
+# Per-arch (not universal/lipo'd) binaries: smaller downloads per user, and it
+# keeps macOS and Linux symmetric — both platforms resolve arch the same way in
+# the formula (`on_arm`/`on_intel` nested inside `on_macos`/`on_linux`).
+#
+# Prebuilt binaries (not a source `depends_on "zig"`/`"rust"` formula) are
+# deliberate: users need no toolchain, installs are fast, and Homebrew-core's
+# zig tracks stable releases and won't reliably have the version fig/twig need.
+#
+# Prerequisite before a repo's first tagged release: install the diaryx-bot
+# GitHub App on diaryx-org/homebrew-tap (Contents:write) and add its App ID +
+# private key as the TAP_APP_ID / TAP_APP_KEY secrets on the calling repo. The
+# bump-formula job mints a short-lived token from these.
+#
+# Inputs are passed to `run:` blocks via `env:` rather than `${{ }}`
+# interpolation, so a value can never be spliced into the shell as code.
+
+name: Homebrew
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "Binary name, formula name, and asset filename stem (e.g. twig)"
+        required: true
+        type: string
+      desc:
+        description: "Homebrew formula `desc` line. No trailing period; keep under 80 chars to satisfy `brew audit`."
+        required: true
+        type: string
+      language:
+        description: "Build toolchain: zig | rust"
+        required: true
+        type: string
+
+      # --- zig ---
+      zig-version:
+        description: "Zig toolchain version, pinned to match the repo's CI"
+        required: false
+        type: string
+        default: "0.16.0"
+      zig-flags:
+        description: >-
+          Build flags passed to `zig build` alongside `-Dtarget=`. fig exposes
+          `-Dstrip`; twig's build.zig does not, which is why this is a full
+          override rather than a fixed string plus a strip toggle.
+        required: false
+        type: string
+        default: "-Doptimize=ReleaseFast"
+
+      # --- rust ---
+      cargo-package:
+        description: >-
+          `cargo build -p <pkg>` target. Set it when the CLI is one crate in a
+          workspace (moid builds `moid-cli`, whose binary is named `moid`);
+          leave empty to build the workspace default.
+        required: false
+        type: string
+        default: ""
+
+      # --- shared ---
+      tag-prefix:
+        description: >-
+          Stripped from the tag to get the version. fig ships the CLI on its own
+          `cli/v*` line; twig and moid tag the whole repo `v*`.
+        required: false
+        type: string
+        default: "v"
+      homepage:
+        description: "Formula `homepage`. Defaults to the calling repo's URL."
+        required: false
+        type: string
+        default: ""
+      license:
+        description: "Formula `license` (SPDX expression)"
+        required: false
+        type: string
+        default: "MIT OR Apache-2.0"
+      formula-class:
+        description: >-
+          Ruby class name in the formula. Defaults to the binary name with
+          hyphen-separated words capitalized (`foo-bar` -> `FooBar`), which is
+          Homebrew's own convention; override only if that guess is wrong.
+        required: false
+        type: string
+        default: ""
+      wasi:
+        description: >-
+          Also build and attach a wasm32-wasi binary (zig only). Not part of the
+          formula — brew doesn't run wasm — just a portable download for any
+          WASI runtime, so it neither blocks nor feeds bump-formula.
+        required: false
+        type: boolean
+        default: false
+      tap-owner:
+        description: "Owner of the tap repository"
+        required: false
+        type: string
+        default: "diaryx-org"
+      tap-name:
+        description: >-
+          Tap repository name. Split from the owner because the App-token step
+          needs the two separately and Actions expressions have no `split`.
+        required: false
+        type: string
+        default: "homebrew-tap"
+    secrets:
+      TAP_APP_ID:
+        description: "diaryx-bot GitHub App ID"
+        required: true
+      TAP_APP_KEY:
+        description: "diaryx-bot GitHub App private key"
+        required: true
+
+jobs:
+  binaries:
+    # One job per (os, arch) rather than one per os building both arches. Same
+    # four assets, but the arches build in parallel and a single cross-compile
+    # failure doesn't take its sibling's artifact down with it.
+    name: Build + attach ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write # attaches assets to the GitHub Release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: macos-arm64
+            os: macos-latest
+            zig-target: aarch64-macos
+            rust-target: aarch64-apple-darwin
+          - asset: macos-x86_64
+            os: macos-latest
+            zig-target: x86_64-macos
+            rust-target: x86_64-apple-darwin
+          - asset: linux-x86_64
+            os: ubuntu-latest
+            zig-target: x86_64-linux
+            rust-target: x86_64-unknown-linux-gnu
+          - asset: linux-aarch64
+            os: ubuntu-latest
+            zig-target: aarch64-linux
+            rust-target: aarch64-unknown-linux-gnu
+            # Zig cross-compiles to any target out of the box; cargo needs a
+            # linker for the non-native one.
+            cross-apt: gcc-aarch64-linux-gnu
+            cross-linker: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v7
+
+      - if: inputs.language == 'zig'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ inputs.zig-version }}
+
+      - if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install cross linker
+        if: inputs.language == 'rust' && matrix.cross-apt != ''
+        env:
+          CROSS_APT: ${{ matrix.cross-apt }}
+        run: sudo apt-get update && sudo apt-get install -y "$CROSS_APT"
+
+      # Both branches leave the binary at ./dist/<name>, so the tar step below
+      # is shared.
+      - name: Build (zig)
+        if: inputs.language == 'zig'
+        env:
+          NAME: ${{ inputs.name }}
+          ZIG_FLAGS: ${{ inputs.zig-flags }}
+          TARGET: ${{ matrix.zig-target }}
+        run: |
+          # ZIG_FLAGS is intentionally unquoted — it is a flag list, not one arg.
+          # shellcheck disable=SC2086
+          zig build $ZIG_FLAGS -Dtarget="$TARGET" --prefix zig-out/"$TARGET"
+          mkdir -p dist && cp zig-out/"$TARGET"/bin/"$NAME" dist/"$NAME"
+
+      - name: Build (rust)
+        if: inputs.language == 'rust'
+        env:
+          NAME: ${{ inputs.name }}
+          PKG: ${{ inputs.cargo-package }}
+          TARGET: ${{ matrix.rust-target }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross-linker }}
+        run: |
+          # Unquoted so an empty PKG collapses to nothing rather than an empty arg.
+          # shellcheck disable=SC2086
+          cargo build --release ${PKG:+-p "$PKG"} --target "$TARGET"
+          mkdir -p dist && cp target/"$TARGET"/release/"$NAME" dist/"$NAME"
+
+      - name: Package
+        env:
+          NAME: ${{ inputs.name }}
+          ASSET: ${{ matrix.asset }}
+        run: tar -czf "$NAME-$ASSET.tar.gz" -C dist "$NAME"
+
+      - name: Attach to the GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ inputs.name }}-${{ matrix.asset }}.tar.gz
+
+  wasi-binary:
+    name: Build + attach WASI binary
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag' && inputs.wasi
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ inputs.zig-version }}
+      - name: Build wasm32-wasi
+        env:
+          NAME: ${{ inputs.name }}
+          ZIG_FLAGS: ${{ inputs.zig-flags }}
+        run: |
+          # shellcheck disable=SC2086  # flag list, not one arg
+          zig build $ZIG_FLAGS -Dtarget=wasm32-wasi --prefix zig-out/wasi
+          cp zig-out/wasi/bin/"$NAME".wasm "$NAME"-wasi.wasm
+      - name: Attach to the GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ inputs.name }}-wasi.wasm
+
+  bump-formula:
+    name: Bump tap formula
+    runs-on: ubuntu-latest
+    needs: [binaries]
+    if: github.ref_type == 'tag'
+    steps:
+      # No checkout: the formula is rendered inline and pushed to the tap, which
+      # this job clones itself. Nothing from the calling repo's tree is read.
+      #
+      # Downloading the four tarballs the job above just attached and hashing
+      # them is cheaper and less brittle than passing checksums between jobs via
+      # artifacts. The formula body is inlined rather than kept as a checked-in
+      # Formula/<name>.rb template: the only place a formula file belongs is the
+      # tap, so a second copy here would exist purely to be templated.
+      - name: Compute checksums and render the Homebrew formula
+        env:
+          NAME: ${{ inputs.name }}
+          DESC: ${{ inputs.desc }}
+          LICENSE: ${{ inputs.license }}
+          HOMEPAGE: ${{ inputs.homepage }}
+          FORMULA_CLASS: ${{ inputs.formula-class }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#"$TAG_PREFIX"}"
+          homepage="${HOMEPAGE:-https://github.com/$REPO}"
+          base="https://github.com/$REPO/releases/download/$TAG"
+
+          class="$FORMULA_CLASS"
+          if [ -z "$class" ]; then
+            IFS='-' read -ra parts <<< "$NAME"
+            for p in "${parts[@]}"; do class="$class${p^}"; done
+          fi
+
+          sha() { curl -fsSL "$base/$NAME-$1.tar.gz" | sha256sum | cut -d' ' -f1; }
+          mac_arm64_sha=$(sha macos-arm64)
+          mac_x64_sha=$(sha macos-x86_64)
+          linux_x64_sha=$(sha linux-x86_64)
+          linux_arm64_sha=$(sha linux-aarch64)
+
+          cat > /tmp/formula.rb <<RUBY
+          class $class < Formula
+            desc "$DESC"
+            homepage "$homepage"
+            version "$version"
+            license "$LICENSE"
+
+            on_macos do
+              on_arm do
+                url "$base/$NAME-macos-arm64.tar.gz"
+                sha256 "$mac_arm64_sha"
+              end
+              on_intel do
+                url "$base/$NAME-macos-x86_64.tar.gz"
+                sha256 "$mac_x64_sha"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "$base/$NAME-linux-aarch64.tar.gz"
+                sha256 "$linux_arm64_sha"
+              end
+              on_intel do
+                url "$base/$NAME-linux-x86_64.tar.gz"
+                sha256 "$linux_x64_sha"
+              end
+            end
+
+            def install
+              bin.install "$NAME"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/$NAME --version")
+            end
+          end
+          RUBY
+
+      # Mint a short-lived installation token from the diaryx-bot GitHub App
+      # (scoped to Contents:write on the tap only). Replaces the old
+      # HOMEBREW_TAP_TOKEN PAT, which was tied to a personal account and broke
+      # when the repos moved into the org. The token lasts ~1h and is confined
+      # to this job; only the App's private key is stored long-term.
+      - name: Mint a tap token from the GitHub App
+        id: tap_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.TAP_APP_ID }}
+          private-key: ${{ secrets.TAP_APP_KEY }}
+          owner: ${{ inputs.tap-owner }}
+          repositories: ${{ inputs.tap-name }}
+
+      - name: Push to the tap
+        env:
+          COMMITTER_TOKEN: ${{ steps.tap_token.outputs.token }}
+          NAME: ${{ inputs.name }}
+          TAP: ${{ inputs.tap-owner }}/${{ inputs.tap-name }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${COMMITTER_TOKEN}@github.com/$TAP" tap
+          cp /tmp/formula.rb "tap/Formula/$NAME.rb"
+          cd tap
+          git config user.name "diaryx-bot[bot]"
+          git config user.email "306900725+diaryx-bot[bot]@users.noreply.github.com"
+          git add "Formula/$NAME.rb"
+          if git diff --cached --quiet; then
+            echo "Formula unchanged — skipping commit"
+          else
+            git commit -m "$NAME ${TAG#"$TAG_PREFIX"}"
+            git push
+          fi
