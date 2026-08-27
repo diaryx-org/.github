@@ -239,6 +239,14 @@ jobs:
           ASSET: ${{ matrix.asset }}
         run: tar -czf "$NAME-$ASSET.tar.gz" -C dist "$NAME"
 
+      # No `body` or `body_path`, deliberately. The calling repo's release notes are
+      # written by `release github-release`, out of the section the tag's own tree
+      # carries, and which of the two arrives first is a matter of how long this
+      # build takes. This action creates the release when it gets there first and
+      # updates it when it does not — and on the update path it resolves the body
+      # as `workflowBody || existingReleaseBody`, so passing none here is what
+      # leaves the notes alone. Give this step a body and it will silently
+      # overwrite them.
       - name: Attach to the GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -288,6 +296,7 @@ jobs:
           cargo build --release ${PKG:+-p "$PKG"} --target "$target"
           cp target/"$target"/release/"$NAME".wasm "$NAME"-wasi.wasm
 
+      # No body here either, for the reason given on the step above.
       - name: Attach to the GitHub Release
         uses: softprops/action-gh-release@v3
         with:
