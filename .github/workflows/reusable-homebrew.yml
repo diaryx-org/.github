@@ -73,6 +73,20 @@ on:
         default: "-Doptimize=ReleaseFast"
 
       # --- rust ---
+      rust-toolchain:
+        description: >-
+          Rust toolchain to install, pinned to match the repo's CI — the same
+          contract `zig-version` has above. It matters more than it looks: a repo
+          carrying a `rust-toolchain.toml` resolves to whatever that file names,
+          and a toolchain file outranks the `rustup default` this action sets. So
+          leaving this at `stable` for such a repo installs the cross-compilation
+          targets onto `stable` and then builds with the pinned toolchain, which
+          has none of them — `can't find crate for std`, on the three
+          cross-compiled targets only, and not until a tag is pushed. Repos with
+          a toolchain file must pass the version it names.
+        required: false
+        type: string
+        default: "stable"
       cargo-package:
         description: >-
           `cargo build -p <pkg>` target. Set it when the CLI is one crate in a
@@ -198,6 +212,7 @@ jobs:
       - if: inputs.language == 'rust'
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ inputs.rust-toolchain }}
           targets: ${{ matrix.rust-target }}
 
       - name: Install cross linker
@@ -270,6 +285,7 @@ jobs:
       - if: inputs.language == 'rust'
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ inputs.rust-toolchain }}
           targets: ${{ inputs.wasi-target || 'wasm32-wasip1' }}
 
       - name: Build WASI (zig)
