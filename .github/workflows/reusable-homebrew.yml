@@ -108,8 +108,9 @@ on:
       # --- shared ---
       tag-prefix:
         description: >-
-          Stripped from the tag to get the version. fig ships the CLI on its own
-          `cli/v*` line; twig and moid tag the whole repo `v*`.
+          Stripped from the tag to get the version. Every caller today tags the
+          whole repo `v*`; a repo that tags its CLI on a line of its own
+          (`cli/v*`) passes that prefix.
         required: false
         type: string
         default: "v"
