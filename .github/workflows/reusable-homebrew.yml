@@ -62,7 +62,7 @@ on:
         description: "Zig toolchain version, pinned to match the repo's CI"
         required: false
         type: string
-        default: "0.16.0"
+        default: "0.17.0"
       zig-flags:
         description: >-
           Build flags passed to `zig build` alongside `-Dtarget=`. fig exposes
