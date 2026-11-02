@@ -95,6 +95,15 @@ on:
         required: false
         type: string
         default: ""
+      cargo-features:
+        description: >-
+          `cargo build --features <list>` for the native binaries, which the
+          WASI build does not take: a feature that names a native-only
+          dependency (an allocator in C) has nothing to build there. Leave
+          empty for the package's defaults.
+        required: false
+        type: string
+        default: ""
 
       needs-zig:
         description: >-
@@ -241,12 +250,14 @@ jobs:
         env:
           NAME: ${{ inputs.name }}
           PKG: ${{ inputs.cargo-package }}
+          FEATURES: ${{ inputs.cargo-features }}
           TARGET: ${{ matrix.rust-target }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross-linker }}
         run: |
-          # Unquoted so an empty PKG collapses to nothing rather than an empty arg.
+          # Unquoted so an empty PKG or FEATURES collapses to nothing rather
+          # than an empty arg.
           # shellcheck disable=SC2086
-          cargo build --release ${PKG:+-p "$PKG"} --target "$TARGET"
+          cargo build --release ${PKG:+-p "$PKG"} ${FEATURES:+--features "$FEATURES"} --target "$TARGET"
           mkdir -p dist && cp target/"$TARGET"/release/"$NAME" dist/"$NAME"
 
       - name: Package
